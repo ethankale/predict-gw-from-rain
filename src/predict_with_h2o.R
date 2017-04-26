@@ -189,8 +189,11 @@ buildModel <- function(precip, precip.datetime,
     
     # Find the most important windows to preserver them from being combined
     if (i == 1) {
-      cutoff <- quantile(importance[[1]]$percentage, probs = 0.8)
-      begin.top <- windows$begin[which(importance[[1]]$percentage > cutoff)]
+      cutoff <- quantile(importance[[1]]$percentage, probs = 0.7)
+      imp.top <- which(importance[[1]]$percentage > cutoff)
+      begin.top <- windows$begin[c(imp.top,
+                                   imp.top+1,
+                                   imp.top-1)]
     }
     
     r2.new <- importance[[2]]
@@ -209,27 +212,37 @@ buildModel <- function(precip, precip.datetime,
     
     b[[i]] <- breaks
     
-    imp <- importance[[1]]$relative_importance
+    imp <- importance[[1]]$percentage
+    protected <- windows$begin %in% begin.top
+
+    message("Top Variables: ", paste(begin.top, ","))
+    message("Number of Bottom Variables: ", length(vars.lowest))
+    message("R2 Change: ", r2.change)
     
-    if(sd.new >= max.sd && nrow(windows) >= min.variable.n) {
-      vars.lowest <- which.min(rollmean(imp,
-                                        3,
-                                        align = "center",
-                                        fill = median(imp)))
+    if(nrow(windows) >= min.variable.n) {
       
-      # Stop the function if the lowest ranked variable is in the 
-      #   initially-select list of most important variables
-      if (windows$begin[vars.lowest] %in% begin.top ||
-          windows$begin[vars.lowest-1] %in% begin.top ||
-          windows$begin[vars.lowest+1] %in% begin.top) {
-        message("Window begins on: ", windows$begin[vars.lowest])
+      # Select variables to remove.  We want variables with low explanatory 
+      #   power, that aren't protected (meaning they had low power in the 
+      #   initial).  We also prevent variables that are next to each other
+      #   from being eliminated, to reduce the buildup of peaks.
+      vars.imp.mean <- rollmean(imp,
+                                3,
+                                align = "center",
+                                fill = median(imp))
+      lowest.cutoff <- quantile(vars.imp.mean, 0.1)
+      vars.under.cutoff <- imp <= lowest.cutoff
+      vars.lowest <- which(!protected & vars.under.cutoff)[c(FALSE, TRUE)]
+
+      # Stop the function if there are no unprotected variables of the lowest
+      #   importance
+      if (length(vars.lowest) <= 2) {
         break
       }
 
       breaks <- breaks[-vars.lowest]
       windows <- makeHourlyWindows(breaks)
     } else {
-      end <- 1
+      break
     }
     
     metrics <- data.frame(nvar = metrics.nvar,

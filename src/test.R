@@ -27,7 +27,7 @@ site <- tibble(n = site.name,
                w = site.well, 
                p = site.precip)
 
-#site <- site[3,]
+site <- site[3,]
 
 i <- 0
 
@@ -71,7 +71,7 @@ while(i < nrow(site)) {
   nruns <- 0
   imp <- data.frame()
   
-  while (nruns <= 5) {
+  while (nruns <= 8) {
     nruns <- nruns+1
     
     importance <- defineHydrology(precip$precip, precip$date.time, 
