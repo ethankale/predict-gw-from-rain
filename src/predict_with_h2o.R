@@ -129,7 +129,7 @@ defineHydrology <- function(precip, precip.datetime,
   
   temp.path <- "./data/tmp.csv"
   write_csv(e.and.p, temp.path)
-  e.and.p.hex <- h2o.importFile(temp.path, "l.and.p.hex")
+  e.and.p.hex <- h2o.importFile(temp.path, "e.and.p.hex")
   
   # Split for training, then make the model
   e.and.p.split <- h2o.splitFrame(e.and.p.hex, ratios = c(0.8))
@@ -146,12 +146,17 @@ defineHydrology <- function(precip, precip.datetime,
     mutate(weeks = (((begin+end)/2) / (24*7))) %>%
     arrange(weeks)
   
+  # Pull out and return predicted elevations
+  e.and.p.drf.predict <- as.data.frame(h2o.predict(e.and.p.drf.level,
+                                     e.and.p.hex))
+  
   # Clean up
   file.remove(temp.path)
   #h2o.shutdown()
   
-  return(list(variable.import, h2o.r2(e.and.p.drf.level)))
-  #return(e.and.p)
+  return(list(variable.import, 
+              h2o.r2(e.and.p.drf.level),
+              e.and.p.drf.predict))
 }
 
 # Build a model by automatically collapsing neighboring variables (weeks)
@@ -159,97 +164,99 @@ defineHydrology <- function(precip, precip.datetime,
 
 buildModel <- function(precip, precip.datetime, 
                        elevation, elevation.datetime) {
-  
+  library(moments)  
+
   # Look at how well the model performs as variables are grouped
+  metrics.iter <- c()
   metrics.nvar <- c()
   metrics.sd <- c()
   metrics.r2 <- c()
+  metrics.skew <- c()
   
   # Track breakpoints
   b <- list()
   
-  min.variable.n <- 10
-  min.r2.improve <- 0.001
-  max.sd <- 0.01
-  
-  r2.old <- 0
-  
   breaks <- c(1, seq(from = 1, to = 52, by = 1)*24*7)
   windows <- makeHourlyWindows(breaks)
+  n <- nrow(windows)
   
+  # We return the breaks with the best R2.  Somewhat naive metric.
+  breaks.best <- breaks
   i <- 0
   end <- 0
   
-  while(end == 0) {
+  while(i < n) {
     
     i <- i+1
     importance <- defineHydrology(precip, precip.datetime, 
                                   elevation, elevation.datetime,
                                   windows)
-    
-    # Find the most important windows to preserver them from being combined
-    if (i == 1) {
-      cutoff <- quantile(importance[[1]]$percentage, probs = 0.7)
-      imp.top <- which(importance[[1]]$percentage > cutoff)
-      begin.top <- windows$begin[c(imp.top,
-                                   imp.top+1,
-                                   imp.top-1)]
-    }
-    
+    imp.percent <- importance[[1]]$percentage
+        
     r2.new <- importance[[2]]
-    r2.change <- r2.new - r2.old
-    
-    sd.new <- sd(importance[[1]]$percentage)
 
-    r2.old <- r2.new
+    sd.new <- sd(imp.percent)
+
     message("R Squared: ", r2.new)
     message("Standard Deviation: ", sd.new)
     message("Number of Variables: ", nrow(windows))
     
+    # Update metrics for this iteration
     metrics.nvar <- c(metrics.nvar, nrow(windows))
+    metrics.iter <- c(metrics.iter, i)
     metrics.sd <- c(metrics.sd, sd.new)
     metrics.r2 <- c(metrics.r2, r2.new)
+    metrics.skew <- c(metrics.skew, skewness(imp.percent))
     
-    b[[i]] <- breaks
+    # We want to evaluate not just the importance of one specific variable,
+    #   but the importance of the variables around it.  This is important
+    #   because lumping or splitting effects neighboring variables as well.
+    vars.imp.mean <- rollmean(imp.percent,
+                              3,
+                              align = "center",
+                              fill = median(imp.percent))
     
-    imp <- importance[[1]]$percentage
-    protected <- windows$begin %in% begin.top
-
-    message("Top Variables: ", paste(begin.top, ","))
-    message("Number of Bottom Variables: ", length(vars.lowest))
-    message("R2 Change: ", r2.change)
-    
-    if(nrow(windows) >= min.variable.n) {
-      
-      # Select variables to remove.  We want variables with low explanatory 
-      #   power, that aren't protected (meaning they had low power in the 
-      #   initial).  We also prevent variables that are next to each other
-      #   from being eliminated, to reduce the buildup of peaks.
-      vars.imp.mean <- rollmean(imp,
-                                3,
-                                align = "center",
-                                fill = median(imp))
-      lowest.cutoff <- quantile(vars.imp.mean, 0.1)
-      vars.under.cutoff <- imp <= lowest.cutoff
-      vars.lowest <- which(!protected & vars.under.cutoff)[c(FALSE, TRUE)]
-
-      # Stop the function if there are no unprotected variables of the lowest
-      #   importance
-      if (length(vars.lowest) <= 2) {
-        break
-      }
-
+    # Switch between lumping and splitting variables, depending on skewness.
+    #   Distribution of importance starts out skewed right; we bring
+    #   it down by lumping variables.  If it drops too far we can split
+    #   variables.  This will tend to reduce the number of variables to a
+    #   stable minimum and drive up R2 (hopefully).
+    if(skewness(imp.percent) >= 1) {
+      message("Lumping...")
+      # Select variables to remove, w/ lowest explanatory power
+      vars.lowest <- which.min(vars.imp.mean)
       breaks <- breaks[-vars.lowest]
       windows <- makeHourlyWindows(breaks)
+
     } else {
-      break
+      message("Splitting...")
+      vars.highest <- which.max(vars.imp.mean)
+      b2 <- breaks[c(vars.highest-1, vars.highest+1)]
+      b3 <- seq(from = b2[1], to = b2[2], by = ((b2[2] - b2[1])/3))[2:3]
+      
+      b <- c(breaks[c(1:(vars.highest-1))],
+             b3,
+             breaks[c((vars.highest+1):length(breaks))])
+      breaks <- round(b)
+      windows <- makeHourlyWindows(breaks)
+
     }
     
-    metrics <- data.frame(nvar = metrics.nvar,
+    #message(paste0(breaks, ":"))
+    metrics <- data.frame(iter = metrics.iter,
+                          nvar = metrics.nvar,
                           sd = metrics.sd,
-                          r2 = metrics.r2)
+                          r2 = metrics.r2,
+                          skew = metrics.skew)
+    
+    # Return the breaks with the best R2
+    if (r2.new >= max(metrics.r2)) {
+      breaks.best <- breaks
+    }
     
   }
-  return(list(breaks, metrics, b))
+  return(list(breaks.best, metrics))
 }
+
+
 

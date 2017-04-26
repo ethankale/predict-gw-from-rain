@@ -71,7 +71,7 @@ while(i < nrow(site)) {
   nruns <- 0
   imp <- data.frame()
   
-  while (nruns <= 8) {
+  while (nruns <= 2) {
     nruns <- nruns+1
     
     importance <- defineHydrology(precip$precip, precip$date.time, 
@@ -115,15 +115,17 @@ while(i < nrow(site)) {
   model.refined <- buildModel(precip$precip, precip$date.time,
                               elevations$level, elevations$dt)
   breaks.new <- model.refined[[1]]
-  m <- model.refined[[2]]
-  b <- model.refined[[3]]
-
   windows <- makeHourlyWindows(breaks.new)
+  
+  m <- model.refined[[2]]
 
   importance <- defineHydrology(precip$precip, precip$date.time,
                                 elevations$level, elevations$dt,
                                 windows)
-
+  p <- tibble(elev.predict = importance[[3]]$predict,
+              dt = elevations$dt,
+              elev.actual = elevations$level)
+  
   # Plot final variable importance
   ggplot(importance[[1]], aes(x = weeks,
                               y = percentage)) +
@@ -140,14 +142,13 @@ while(i < nrow(site)) {
          height = 4)
 
   # Plot change in r2 with consolidation of breakpoints
-  ggplot(m, aes(x = nvar,
+  ggplot(m, aes(x = iter,
                 y = r2)) +
     geom_line() +
     geom_point() +
-    scale_x_reverse() +
     labs(title = paste0(site$n[i], " Change in R2"),
-         subtite = "Change in model fit as rainfall windows are condensed",
-         x = "Number of Variables (or windows)",
+         subtitle = "Change in model fit as rainfall windows are condensed",
+         x = "Number of Iterations",
          y = "R2") +
     theme_minimal()
 
@@ -156,18 +157,34 @@ while(i < nrow(site)) {
          height = 4)
 
   # Plot change in sd with consolidation of breakpoints
-  ggplot(m, aes(x = nvar,
+  ggplot(m, aes(x = iter,
                 y = sd)) +
     geom_line() +
     geom_point() +
-    scale_x_reverse() +
     labs(title = paste0(site$n[i], " Change in Standard Deviation"),
-         subtite = "Change in variable uniformity as rainfall windows are condensed",
-         x = "Number of Variables (or windows)",
+         subtitle = "Change in variable uniformity as rainfall windows are condensed",
+         x = "Number of Iterations",
          y = "Standard Deviation") +
     theme_minimal()
 
   ggsave(paste0("./results/", site$n[i], "_sd_change.png"),
+         width = 7,
+         height = 4)
+  
+  # Plot out the predicted vs. actual values, using the tuned model
+  ggplot(p, aes(x = dt,
+                y = elev.actual)) +
+    geom_point(aes(x = dt,
+                   y = elev.predict),
+               color = "red") +
+    geom_line() +
+    labs(title = paste0(site$n[i], " Predicted and Actual Elevation"),
+         x = "Date",
+         y = "Elevation (feet)") +
+    theme_minimal()
+  
+  
+  ggsave(paste0("./results/", site$n[i], "_prediction.png"),
          width = 7,
          height = 4)
 }
