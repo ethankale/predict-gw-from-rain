@@ -78,6 +78,32 @@ fillPrecip <- function(precip, date.time, interval) {
   return(joined.full)
 }
 
+# Fill elevation gaps with NAs
+#   elevation and dates must be in the same, sequential order and of same length
+#   Returns a tibble
+#   Interval must work with seq()
+fillElevation <- function(elev, date.time, interval) {
+  
+  library(tidyverse)
+  library(zoo)
+  
+  joined <- tibble(elev = elev, date.time = date.time)
+  
+  #message(paste0(sum(is.na(joined)), " NA values filled with 0."))
+  
+  date.time.full <- seq(from = min(date.time, na.rm = TRUE), 
+                        to = max(date.time, na.rm = TRUE), 
+                        by = interval)
+  
+  message(paste0((length(date.time.full) - nrow(joined)),
+                 " gap values filled with NA."))
+  
+  joined.full <- tibble(date.time = date.time.full) %>%
+    left_join(joined)
+  
+  return(joined.full)
+}
+
 makeHourlyWindows <- function(breaks) {
 
   begin <- breaks[2:length(breaks)]
@@ -97,12 +123,16 @@ makeHourlyWindows <- function(breaks) {
 #   elevation is a list/vector of elevations (well, lake)
 #   elevation.datetime is the list/vector of dates that correspond with
 #     values in elevation
+#   windows is a dataframe with title, begin, and end columns.  The
+#     precipitation data is split by the begin and end columns to create
+#     the variables
 #
 #   dates & times must match exactly between precip & elevation; suggest using
 #     either hourly or 15 minute data
 defineHydrology <- function(precip, precip.datetime, 
                             elevation, elevation.datetime,
-                            windows) {
+                            windows,
+                            split.date = NULL) {
   library(h2o)
   library(zoo)
   
@@ -121,8 +151,14 @@ defineHydrology <- function(precip, precip.datetime,
                        precipCumSums(precip, windows))
   elev <- tibble(dt = elevation.datetime, elev = elevation)
   
-  e.and.p <- elev %>%
+  e.and.p.orig <- elev %>%
     left_join(precip.join)
+  
+  if (is.null(split.date)) {
+    split.date <- max(e.and.p.orig$dt)
+  }
+  
+  e.and.p <- e.and.p.orig[which(e.and.p.orig$dt <= split.date),]
   
   # Import the data into H2O and build the model
   #h2o.init()
@@ -147,8 +183,15 @@ defineHydrology <- function(precip, precip.datetime,
     arrange(weeks)
   
   # Pull out and return predicted elevations
-  e.and.p.drf.predict <- as.data.frame(h2o.predict(e.and.p.drf.level,
-                                     e.and.p.hex))
+  if (nrow(e.and.p) == nrow(e.and.p.orig)) {
+    e.and.p.drf.predict <- as.data.frame(h2o.predict(e.and.p.drf.level,
+                                       e.and.p.hex))
+  } else {
+    write_csv(e.and.p.orig, temp.path)
+    e.and.p.orig.hex <- h2o.importFile(temp.path, "e.and.p.orig.hex")
+    e.and.p.drf.predict <- as.data.frame(h2o.predict(e.and.p.drf.level,
+                                                     e.and.p.orig.hex))
+  }
   
   # Clean up
   file.remove(temp.path)
@@ -163,7 +206,8 @@ defineHydrology <- function(precip, precip.datetime,
 #   with low importance scores together
 
 buildModel <- function(precip, precip.datetime, 
-                       elevation, elevation.datetime) {
+                       elevation, elevation.datetime,
+                       split.date = NULL) {
   library(moments)  
 
   # Look at how well the model performs as variables are grouped
@@ -172,6 +216,7 @@ buildModel <- function(precip, precip.datetime,
   metrics.sd <- c()
   metrics.r2 <- c()
   metrics.skew <- c()
+  metrics.step <- c()
   
   # Track breakpoints
   b <- list()
@@ -179,6 +224,7 @@ buildModel <- function(precip, precip.datetime,
   breaks <- c(1, seq(from = 1, to = 52, by = 1)*24*7)
   windows <- makeHourlyWindows(breaks)
   n <- nrow(windows)
+  #n <- 25
   
   # We return the breaks with the best R2.  Somewhat naive metric.
   breaks.best <- breaks
@@ -188,9 +234,11 @@ buildModel <- function(precip, precip.datetime,
   while(i < n) {
     
     i <- i+1
+
     importance <- defineHydrology(precip, precip.datetime, 
                                   elevation, elevation.datetime,
-                                  windows)
+                                  windows,
+                                  split.date = split.date)
     imp.percent <- importance[[1]]$percentage
         
     r2.new <- importance[[2]]
@@ -222,7 +270,9 @@ buildModel <- function(precip, precip.datetime,
     #   variables.  This will tend to reduce the number of variables to a
     #   stable minimum and drive up R2 (hopefully).
     if(skewness(imp.percent) >= 1) {
+    #if(0) {
       message("Lumping...")
+      metrics.step <- c(metrics.step, "L")
       # Select variables to remove, w/ lowest explanatory power
       vars.lowest <- which.min(vars.imp.mean)
       breaks <- breaks[-vars.lowest]
@@ -230,6 +280,7 @@ buildModel <- function(precip, precip.datetime,
 
     } else {
       message("Splitting...")
+      metrics.step <- c(metrics.step, "S")
       vars.highest <- which.max(vars.imp.mean)
       b2 <- breaks[c(vars.highest-1, vars.highest+1)]
       b3 <- seq(from = b2[1], to = b2[2], by = ((b2[2] - b2[1])/3))[2:3]
@@ -239,7 +290,6 @@ buildModel <- function(precip, precip.datetime,
              breaks[c((vars.highest+1):length(breaks))])
       breaks <- round(b)
       windows <- makeHourlyWindows(breaks)
-
     }
     
     #message(paste0(breaks, ":"))
@@ -247,15 +297,16 @@ buildModel <- function(precip, precip.datetime,
                           nvar = metrics.nvar,
                           sd = metrics.sd,
                           r2 = metrics.r2,
-                          skew = metrics.skew)
+                          skew = metrics.skew,
+                          step = metrics.step)
     
-    # Return the breaks with the best R2
+    # The breaks with the best R2
     if (r2.new >= max(metrics.r2)) {
       breaks.best <- breaks
     }
     
   }
-  return(list(breaks.best, metrics))
+  return(list(breaks, metrics))
 }
 
 

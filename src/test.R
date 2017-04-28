@@ -56,6 +56,8 @@ while(i < nrow(site)) {
   
   precip <- fillPrecip(rain$rain, rain$dt, "hour")
   
+  split.date <- as.POSIXct("2015-10-01 00:00:00")
+  
   ##########################################
   # Create weekly breaks going back one year,
   #   and plot the variable responses
@@ -76,7 +78,8 @@ while(i < nrow(site)) {
     
     importance <- defineHydrology(precip$precip, precip$date.time, 
                                   elevations$level, elevations$dt,
-                                  windows)
+                                  windows,
+                                  split.date = split.date)
     imp <- rbind(imp, importance[[1]])
     
   }
@@ -113,7 +116,8 @@ while(i < nrow(site)) {
   
 
   model.refined <- buildModel(precip$precip, precip$date.time,
-                              elevations$level, elevations$dt)
+                              elevations$level, elevations$dt,
+                              split.date = split.date)
   breaks.new <- model.refined[[1]]
   windows <- makeHourlyWindows(breaks.new)
   
@@ -121,7 +125,8 @@ while(i < nrow(site)) {
 
   importance <- defineHydrology(precip$precip, precip$date.time,
                                 elevations$level, elevations$dt,
-                                windows)
+                                windows,
+                                split.date = split.date)
   p <- tibble(elev.predict = importance[[3]]$predict,
               dt = elevations$dt,
               elev.actual = elevations$level)
